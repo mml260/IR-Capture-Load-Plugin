@@ -1,4 +1,5 @@
 #include "PluginEditor.h"
+#include <cmath>
 
 void IRCaptureLoadAudioProcessorEditor::WaveView::paint(juce::Graphics& g)
 {
@@ -29,15 +30,97 @@ void IRCaptureLoadAudioProcessorEditor::Meter::paint(juce::Graphics& g)
     r.setWidth(r.getWidth() * juce::jlimit(0.0f, 1.0f, (value + 60.0f) / 60.0f));
     g.setColour(value > -1.0f ? juce::Colours::red : juce::Colour(0xff54c7b5));
     g.fillRoundedRectangle(r, 2.0f);
+    if (showTarget)
+    {
+        auto target = getLocalBounds().toFloat().reduced(3.0f);
+        target.setX(target.getX() + target.getWidth() * (48.0f / 60.0f));
+        target.setWidth(target.getWidth() * (6.0f / 60.0f));
+        g.setColour(juce::Colour(0xff49b78e).withAlpha(0.36f));
+        g.fillRect(target);
+        g.setColour(juce::Colour(0xff68d0a7));
+        g.drawRect(target, 1.0f);
+    }
     g.setColour(juce::Colours::white);
     g.setFont(11.0f);
     g.drawText(juce::String(value, 1) + " dBFS", getLocalBounds().reduced(5, 0), juce::Justification::centredRight);
 }
 
+void IRCaptureLoadAudioProcessorEditor::SpectrumView::paint(juce::Graphics& g)
+{
+    g.fillAll(juce::Colour(0xff101318));
+    auto bounds = getLocalBounds();
+    g.setColour(juce::Colour(0xff303741)); g.drawRect(bounds);
+    g.setColour(juce::Colour(0xffc5cbd4)); g.setFont(11.0f);
+    g.drawText("Captured IR frequency response  •  1/12 octave smoothing  •  dB relative to peak", bounds.reduced(6, 1).removeFromTop(15), juce::Justification::centredLeft);
+    auto plot = bounds.reduced(34, 18);
+    plot.removeFromBottom(16);
+    plot.removeFromLeft(2);
+    for (int db : { 0, -20, -40, -60 })
+    {
+        const float y = plot.getY() + (0.0f - db) / 60.0f * plot.getHeight();
+        g.setColour(juce::Colour(0xff303741)); g.drawHorizontalLine(juce::roundToInt(y), static_cast<float>(plot.getX()), static_cast<float>(plot.getRight()));
+        g.setColour(juce::Colour(0xffaeb6c2)); g.setFont(10.0f);
+        g.drawText(juce::String(db), bounds.getX() + 2, juce::roundToInt(y - 7), 29, 14, juce::Justification::centredRight);
+    }
+    for (double hz : { 20.0, 100.0, 1000.0, 10000.0, 20000.0 })
+    {
+        const float x = plot.getX() + static_cast<float>(std::log(hz / 20.0) / std::log(1000.0)) * plot.getWidth();
+        g.setColour(juce::Colour(0xff303741)); g.drawVerticalLine(juce::roundToInt(x), static_cast<float>(plot.getY()), static_cast<float>(plot.getBottom()));
+        const juce::String label = hz >= 1000.0 ? juce::String(hz / 1000.0, hz >= 10000.0 ? 0 : 1) + "k" : juce::String(juce::roundToInt(hz));
+        g.setColour(juce::Colour(0xffaeb6c2)); g.setFont(10.0f);
+        g.drawText(label, juce::roundToInt(x - 20), plot.getBottom() + 1, 40, 14, juce::Justification::centred);
+    }
+    if (data.size() < 2) return;
+    juce::Path response;
+    for (size_t i = 0; i < data.size(); ++i)
+    {
+        const float x = plot.getX() + static_cast<float>(i) * plot.getWidth() / static_cast<float>(data.size() - 1);
+        const float y = plot.getY() + (0.0f - juce::jlimit(-60.0f, 0.0f, data[i])) / 60.0f * plot.getHeight();
+        if (i == 0) response.startNewSubPath(x, y); else response.lineTo(x, y);
+    }
+    g.setColour(juce::Colour(0xff9f80df)); g.strokePath(response, juce::PathStrokeType(1.5f));
+}
+
+void IRCaptureLoadAudioProcessorEditor::AlignmentView::paint(juce::Graphics& g)
+{
+    g.fillAll(juce::Colour(0xff101318));
+    auto bounds = getLocalBounds();
+    g.setColour(juce::Colour(0xff303741)); g.drawRect(bounds);
+    auto plot = bounds.reduced(6, 5);
+    plot.removeFromBottom(12);
+    const float mid = plot.getCentreY();
+    g.setColour(juce::Colour(0xff303741));
+    g.drawHorizontalLine(juce::roundToInt(mid), static_cast<float>(plot.getX()), static_cast<float>(plot.getRight()));
+    g.drawVerticalLine(plot.getX() + plot.getWidth() / 2, static_cast<float>(plot.getY()), static_cast<float>(plot.getBottom()));
+    if (first.empty() && second.empty()) return;
+    float peak = 0.0f;
+    for (float v : first) peak = juce::jmax(peak, std::abs(v));
+    for (float v : second) peak = juce::jmax(peak, std::abs(v));
+    if (peak < 1.0e-6f) peak = 1.0f;
+    const float scale = plot.getHeight() * 0.45f / peak;
+    auto draw = [&g, &plot, mid, scale](const std::vector<float>& values, juce::Colour colour, float shiftSamples)
+    {
+        if (values.size() < 2) return;
+        juce::Path path;
+        bool started = false;
+        for (size_t i = 0; i < values.size(); ++i)
+        {
+            const float sampleAt = static_cast<float>(i) + shiftSamples;
+            const float x = plot.getX() + sampleAt * plot.getWidth() / 480.0f;
+            if (x < plot.getX() || x > plot.getRight()) continue;
+            const float y = mid - values[i] * scale;
+            if (!started) { path.startNewSubPath(x, y); started = true; } else path.lineTo(x, y);
+        }
+        g.setColour(colour); g.strokePath(path, juce::PathStrokeType(1.2f));
+    };
+    draw(first, juce::Colour(0xff54c7d0), 0.0f);
+    draw(second, juce::Colour(0xffe9ad58), offsetMs * 48.0f);
+}
+
 IRCaptureLoadAudioProcessorEditor::IRCaptureLoadAudioProcessorEditor(IRCaptureLoadAudioProcessor& p)
     : AudioProcessorEditor(&p), processor(p)
 {
-    setSize(800, 680);
+    setSize(820, 800);
     title.setText("IR Capture + Load", juce::dontSendNotification); title.setFont(juce::Font(20.0f, juce::Font::bold));
     title.setColour(juce::Label::textColourId, juce::Colours::white); addAndMakeVisible(title);
     for (auto* tab : { &loaderTab, &captureTab })
@@ -52,7 +135,7 @@ IRCaptureLoadAudioProcessorEditor::IRCaptureLoadAudioProcessorEditor(IRCaptureLo
         s.slotTitle.setText(i == 0 ? "Slot A" : "Slot B", juce::dontSendNotification);
         s.slotTitle.setColour(juce::Label::textColourId, s.accent);
         s.slotTitle.setFont(juce::FontOptions(14.0f, juce::Font::bold));
-        s.load.setButtonText("Load WAV"); s.name.setText("Empty slot", juce::dontSendNotification);
+        s.load.setButtonText("Load WAV"); s.save.setButtonText("Export WAV"); s.name.setText("Empty slot", juce::dontSendNotification);
         s.name.setColour(juce::Label::textColourId, juce::Colours::white);
         s.wave.setAccent(s.accent);
         s.gain.setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag); s.gain.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 64, 18);
@@ -61,10 +144,12 @@ IRCaptureLoadAudioProcessorEditor::IRCaptureLoadAudioProcessorEditor(IRCaptureLo
         s.enabled.setButtonText("Enabled"); s.enabled.setToggleState(processor.isSlotEnabled(i), juce::dontSendNotification);
         s.enabled.onClick = [this, i] { processor.setSlotEnabled(i, slots[static_cast<size_t>(i)].enabled.getToggleState()); };
         s.load.onClick = [this, i] { loadSlot(i); };
+        s.save.onClick = [this, i] { saveSlot(i); };
         slotPanels[static_cast<size_t>(i)].setName(i == 0 ? "Slot A" : "Slot B");
         loaderPage.addAndMakeVisible(slotPanels[static_cast<size_t>(i)]);
         slotPanels[static_cast<size_t>(i)].addAndMakeVisible(s.slotTitle);
         slotPanels[static_cast<size_t>(i)].addAndMakeVisible(s.load);
+        slotPanels[static_cast<size_t>(i)].addAndMakeVisible(s.save);
         slotPanels[static_cast<size_t>(i)].addAndMakeVisible(s.name);
         slotPanels[static_cast<size_t>(i)].addAndMakeVisible(s.wave);
         slotPanels[static_cast<size_t>(i)].addAndMakeVisible(s.gain);
@@ -97,12 +182,31 @@ IRCaptureLoadAudioProcessorEditor::IRCaptureLoadAudioProcessorEditor(IRCaptureLo
     for (auto* label : { &loaderStatus, &captureStatus })
     { label->setColour(juce::Label::textColourId, juce::Colour(0xffc5cbd4)); label->setFont(14.0f); }
     loaderPage.addAndMakeVisible(loaderStatus);
+    alignmentView.setData(processor.getSlotStartSamples(0), processor.getSlotStartSamples(1), processor.getSlotBOffsetMs());
+    loaderPage.addAndMakeVisible(alignmentView);
+    autoAlignButton.onClick = [this]
+    {
+        const float ms = processor.autoAlignSlotB();
+        alignmentOffset.setValue(ms, juce::sendNotificationSync);
+    };
+    loaderPage.addAndMakeVisible(autoAlignButton);
+    alignmentOffset.setSliderStyle(juce::Slider::LinearHorizontal);
+    alignmentOffset.setTextBoxStyle(juce::Slider::TextBoxRight, false, 68, 22);
+    alignmentOffset.setRange(-2.0, 2.0, 1.0 / 48.0);
+    alignmentOffset.setTextValueSuffix(" ms");
+    alignmentOffset.setValue(processor.getSlotBOffsetMs(), juce::dontSendNotification);
+    alignmentOffset.onValueChange = [this] { processor.setSlotBOffsetMs(static_cast<float>(alignmentOffset.getValue())); };
+    loaderPage.addAndMakeVisible(alignmentOffset);
+    alignmentLabel.setText("Slot B time shift vs A  (±2 ms)", juce::dontSendNotification);
+    alignmentLabel.setColour(juce::Label::textColourId, juce::Colours::white);
+    alignmentLabel.setFont(12.0f);
+    loaderPage.addAndMakeVisible(alignmentLabel);
 
     inputLabel.setText("Input dBFS", juce::dontSendNotification); outputLabel.setText("Output dBFS", juce::dontSendNotification);
     for (auto* l : { &inputLabel, &outputLabel }) { l->setColour(juce::Label::textColourId, juce::Colours::white); l->setFont(12.0f); addAndMakeVisible(*l); }
     addAndMakeVisible(inputMeter); addAndMakeVisible(outputMeter);
 
-    settings.setText("48,000 Hz  •  Log sweep 20 Hz–20 kHz  •  262,144 samples (5.46 s)  •  one repetition\n250 ms lead-in  •  1 s tail  •  200 ms IR  •  mono 32-bit float WAV", juce::dontSendNotification);
+    settings.setText("48,000 Hz  •  Log sweep 20 Hz–20 kHz  •  262,144 samples (5.46 s)  •  one repetition\nReturn target -12 to -6 dBFS (green meter band)  •  250 ms lead-in  •  1 s tail  •  200 ms IR", juce::dontSendNotification);
     settings.setColour(juce::Label::textColourId, juce::Colour(0xffc5cbd4)); settings.setJustificationType(juce::Justification::topLeft);
     capturePage.addAndMakeVisible(settings);
     sweepLevel.setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag); sweepLevel.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 68, 20);
@@ -123,6 +227,7 @@ IRCaptureLoadAudioProcessorEditor::IRCaptureLoadAudioProcessorEditor(IRCaptureLo
             { if (result == 1) processor.enableLoader(); }));
     };
     resultWave.setAccent(juce::Colour(0xff9f80df)); capturePage.addAndMakeVisible(resultWave);
+    capturePage.addAndMakeVisible(resultSpectrum);
     progress.setSliderStyle(juce::Slider::LinearBar); progress.setRange(0, 1, 0.001); progress.setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0); progress.setEnabled(false);
     capturePage.addAndMakeVisible(progress);
     routing.setText(processor.getRoutingNotice(), juce::dontSendNotification); routing.setColour(juce::Label::textColourId, juce::Colour(0xffffc56e));
@@ -163,26 +268,34 @@ void IRCaptureLoadAudioProcessorEditor::resized()
     meters.removeFromLeft(20); outputLabel.setBounds(meters.removeFromLeft(95)); outputMeter.setBounds(meters.removeFromLeft(190).reduced(0, 10));
     auto body = r.reduced(0, 8); loaderPage.setBounds(body); capturePage.setBounds(body);
     auto lr = loaderPage.getLocalBounds().reduced(12);
-    loaderStatus.setBounds(lr.removeFromBottom(26)); lr.removeFromBottom(4);
+    auto alignment = lr.removeFromBottom(106);
+    loaderStatus.setBounds(lr.removeFromBottom(24)); lr.removeFromBottom(3);
     const int ph = lr.getHeight() / 2;
-    slotPanels[0].setBounds(lr.removeFromTop(ph).reduced(0, 4)); slotPanels[1].setBounds(lr.reduced(0, 4));
+    slotPanels[0].setBounds(lr.removeFromTop(ph).reduced(0, 3)); slotPanels[1].setBounds(lr.reduced(0, 3));
+    auto alignmentPlot = alignment.removeFromTop(64);
+    alignmentView.setBounds(alignmentPlot.removeFromLeft(400));
+    autoAlignButton.setBounds(alignmentPlot.removeFromLeft(112).reduced(4, 12));
+    alignmentOffset.setBounds(alignment.removeFromBottom(27).removeFromRight(330));
+    alignmentLabel.setBounds(alignment.removeFromBottom(27).removeFromLeft(210));
     for (int i = 0; i < 2; ++i)
     {
         auto& s = slots[static_cast<size_t>(i)]; auto q = slotPanels[static_cast<size_t>(i)].getLocalBounds().reduced(12);
-        auto top = q.removeFromTop(30);
-        s.slotTitle.setBounds(top.removeFromLeft(84));
-        s.load.setBounds(top.removeFromLeft(108));
-        s.name.setBounds(q.removeFromTop(25));
-        s.wave.setBounds(q.removeFromTop(60));
-        auto bottom = q.removeFromTop(90); s.enabled.setBounds(bottom.removeFromLeft(100).withY(bottom.getY() + 20).withHeight(28));
-        s.gain.setBounds(bottom.removeFromLeft(120));
+        auto top = q.removeFromTop(28);
+        s.slotTitle.setBounds(top.removeFromLeft(72));
+        s.load.setBounds(top.removeFromLeft(100).reduced(2, 1));
+        s.save.setBounds(top.removeFromLeft(110).reduced(2, 1));
+        s.name.setBounds(q.removeFromTop(22));
+        s.wave.setBounds(q.removeFromTop(50));
+        auto bottom = q.removeFromTop(76); s.enabled.setBounds(bottom.removeFromLeft(100).withY(bottom.getY() + 15).withHeight(28));
+        s.gain.setBounds(bottom.removeFromLeft(116));
     }
     auto cr = capturePage.getLocalBounds().reduced(16);
     settings.setBounds(cr.removeFromTop(54));
-    auto controls = cr.removeFromTop(116); sweepLevel.setBounds(controls.removeFromLeft(120));
-    auto buttons = controls.reduced(6, 28); armButton.setBounds(buttons.removeFromLeft(112)); actionButton.setBounds(buttons.removeFromLeft(108));
-    progress.setBounds(cr.removeFromTop(22)); captureStatus.setBounds(cr.removeFromTop(36));
-    resultWave.setBounds(cr.removeFromTop(120));
+    auto controls = cr.removeFromTop(102); sweepLevel.setBounds(controls.removeFromLeft(120));
+    auto buttons = controls.reduced(6, 22); armButton.setBounds(buttons.removeFromLeft(112)); actionButton.setBounds(buttons.removeFromLeft(108));
+    progress.setBounds(cr.removeFromTop(20)); captureStatus.setBounds(cr.removeFromTop(34));
+    resultWave.setBounds(cr.removeFromTop(82));
+    resultSpectrum.setBounds(cr.removeFromTop(190));
     auto resultButtons = cr.removeFromTop(38); useAButton.setBounds(resultButtons.removeFromLeft(100)); useBButton.setBounds(resultButtons.removeFromLeft(100)); saveButton.setBounds(resultButtons.removeFromLeft(110));
     enableLoaderButton.setBounds(cr.removeFromTop(36).removeFromLeft(150));
     routing.setBounds(cr.removeFromTop(56));
@@ -206,6 +319,22 @@ void IRCaptureLoadAudioProcessorEditor::loadSlot(int slot)
             timerCallback();
         });
 }
+void IRCaptureLoadAudioProcessorEditor::saveSlot(int slot)
+{
+    const juce::String slotName = slot == 0 ? "Slot A" : "Slot B";
+    const juce::File defaultFile = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory)
+        .getChildFile(slotName + " IR 48k.wav");
+    chooser = std::make_unique<juce::FileChooser>("Export " + slotName + " as 48 kHz WAV", defaultFile, "*.wav");
+    chooser->launchAsync(juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::canSelectFiles,
+        [this, slot](const juce::FileChooser& fc)
+        {
+            auto file = fc.getResult(); if (file == juce::File{}) return;
+            if (file.getFileExtension().isEmpty()) file = file.withFileExtension(".wav");
+            juce::String error;
+            if (!processor.saveSlotWav(slot, file, error))
+                juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::WarningIcon, "Export WAV", error);
+        });
+}
 void IRCaptureLoadAudioProcessorEditor::saveCapture()
 {
     chooser = std::make_unique<juce::FileChooser>("Save captured IR", juce::File::getSpecialLocation(juce::File::userDocumentsDirectory).getChildFile("Captured IR.wav"), "*.wav");
@@ -224,6 +353,7 @@ void IRCaptureLoadAudioProcessorEditor::timerCallback()
     const bool capture = capturePageVisible;
     if (capture)
     {
+        inputMeter.setTargetRange(true);
         inputLabel.setText("Return dBFS", juce::dontSendNotification);
         outputLabel.setText("Sweep Send dBFS", juce::dontSendNotification);
         captureStatus.setText(processor.getCaptureStatus(), juce::dontSendNotification);
@@ -236,20 +366,35 @@ void IRCaptureLoadAudioProcessorEditor::timerCallback()
         const bool ready = state == IRCaptureLoadAudioProcessor::CaptureState::Ready;
         useAButton.setEnabled(ready); useBButton.setEnabled(ready); saveButton.setEnabled(ready);
         resultWave.setData(processor.getResultWaveform());
+        if (ready && !resultSpectrumUpdated)
+        {
+            resultSpectrum.setData(processor.getResultSpectrum());
+            resultSpectrumUpdated = true;
+        }
+        else if (!ready && resultSpectrumUpdated)
+        {
+            resultSpectrum.setData({});
+            resultSpectrumUpdated = false;
+        }
     }
     else
     {
+        inputMeter.setTargetRange(false);
         outputGain.setEnabled(true);
         inputLabel.setText("Input dBFS", juce::dontSendNotification);
         outputLabel.setText("Output dBFS", juce::dontSendNotification);
         const bool any = (!processor.getSlotName(0).isEmpty() && processor.isSlotEnabled(0)) || (!processor.getSlotName(1).isEmpty() && processor.isSlotEnabled(1));
-        loaderStatus.setText(any ? "Both slots receive the same mono input and sum to mono." : "No enabled IRs: output is silent.", juce::dontSendNotification);
+        loaderStatus.setText(any ? juce::String{} : "No enabled IRs: output is silent.", juce::dontSendNotification);
+        alignmentView.setData(processor.getSlotStartSamples(0), processor.getSlotStartSamples(1), processor.getSlotBOffsetMs());
+        if (!alignmentOffset.isMouseButtonDown())
+            alignmentOffset.setValue(processor.getSlotBOffsetMs(), juce::dontSendNotification);
     }
     for (int i = 0; i < 2; ++i)
     {
         const auto name = processor.getSlotName(i);
         slots[static_cast<size_t>(i)].name.setText(name.isEmpty() ? "Empty slot" : name, juce::dontSendNotification);
         slots[static_cast<size_t>(i)].wave.setData(processor.getSlotWaveform(i));
+        slots[static_cast<size_t>(i)].save.setEnabled(!name.isEmpty());
     }
     const bool rateOk = std::abs(processor.getHostSampleRate() - 48000.0) < 0.5;
     armButton.setTooltip(rateOk ? "Arm the silent capture path." : "Set the Logic project sample rate to 48 kHz first.");
