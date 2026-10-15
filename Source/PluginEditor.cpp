@@ -263,7 +263,7 @@ void IRCaptureLoadAudioProcessorEditor::resized()
     inputGain.setBounds(inputBounds);
     outputGain.setBounds(outputBounds);
     auto meters = r.removeFromBottom(42);
-    inputLabel.setBounds(meters.removeFromLeft(145)); inputMeter.setBounds(meters.removeFromLeft(220).reduced(0, 10));
+    inputLabel.setBounds(meters.removeFromLeft(175)); inputMeter.setBounds(meters.removeFromLeft(220).reduced(0, 10));
     meters.removeFromLeft(16); outputLabel.setBounds(meters.removeFromLeft(112)); outputMeter.setBounds(meters.removeFromLeft(190).reduced(0, 10));
     auto body = r.reduced(0, 8); loaderPage.setBounds(body); capturePage.setBounds(body);
     auto lr = loaderPage.getLocalBounds().reduced(12);
