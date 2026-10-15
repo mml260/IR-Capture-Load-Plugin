@@ -47,6 +47,7 @@ public:
     void setSlotBOffsetMs(float ms);
     float getSlotBOffsetMs() const { return slotBOffsetMs.load(); }
     float autoAlignSlotB();
+    void swapSlotIRs();
 
     void setSweepLevelDb(float db) { sweepLevelDb.store(juce::jlimit(-60.0f, -6.0f, db)); }
     float getSweepLevelDb() const { return sweepLevelDb.load(); }
