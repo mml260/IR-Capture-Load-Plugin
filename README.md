@@ -22,7 +22,7 @@ The AU bundle is `build/IRCaptureLoad_artefacts/Release/AU/IR Capture + Load.com
 1. Insert **IR Capture + Load** on a mono audio track. The **Input** knob adjusts the signal before both IR slots; **Output** adjusts the summed Loader output. Both are 0 dB by default and range from -24 to +24 dB.
 2. Load a mono WAV into A or B. PCM and floating-point WAV are supported. Files are capped at 200 ms; longer files get a short end fade. Imported IRs keep their level and leading delay.
 3. Each slot has its own level (-60 to +6 dB) and enable switch. Empty or disabled slots are silent. **Export WAV** saves that slot's IR as mono, 48 kHz, 32-bit float WAV; it does not include the phase alignment shift.
-4. The Loader displays the first 10 ms of both IRs. **Auto Align** estimates a time shift for B against A; use the slider for manual adjustment within ±2 ms. The project stores the offset along with both IR sample payloads and their names/settings, so session recall does not depend on the original WAV path.
+4. The Loader displays the first 10 ms of both IRs. **Auto Align** matches the strongest transient peaks in the first 10 ms; use the slider for manual adjustment within ±2 ms. **Swap A/B** exchanges the IRs and resets the alignment offset. The project stores the offset along with both IR sample payloads and their names/settings, so session recall does not depend on the original WAV path.
 
 ## Capture in Logic
 
