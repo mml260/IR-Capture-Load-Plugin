@@ -43,8 +43,13 @@ void IRCaptureLoadAudioProcessor::prepareToPlay(double sampleRate, int maxBlock)
     workB.setSize(1, scratch, false, false, true);
     inputGain.reset(sampleRate, 0.03);
     outputGain.reset(sampleRate, 0.03);
+    slotBDelaySamples.reset(sampleRate, 0.01);
+    slotADelay.fill(0.0f);
+    slotBDelay.fill(0.0f);
+    delayPosition = 0;
     inputGain.setCurrentAndTargetValue(juce::Decibels::decibelsToGain(inputGainDb.load()));
     outputGain.setCurrentAndTargetValue(juce::Decibels::decibelsToGain(outputGainDb.load()));
+    slotBDelaySamples.setCurrentAndTargetValue(static_cast<float>(juce::roundToInt(sampleRate * 0.004)));
     const juce::dsp::ProcessSpec spec { sampleRate, static_cast<juce::uint32>(scratch), 1 };
     for (auto& slot : slots)
     {
@@ -60,7 +65,8 @@ void IRCaptureLoadAudioProcessor::prepareToPlay(double sampleRate, int maxBlock)
                 juce::dsp::Convolution::Normalise::no);
         }
     }
-    setLatencySamples(juce::jmax(slots[0].convolution.getLatency(), slots[1].convolution.getLatency()));
+    setLatencySamples(juce::jmax(slots[0].convolution.getLatency(), slots[1].convolution.getLatency())
+                      + juce::roundToInt(sampleRate * 0.004));
 }
 void IRCaptureLoadAudioProcessor::releaseResources() {}
 bool IRCaptureLoadAudioProcessor::isBusesLayoutSupported(const BusesLayout& l) const
@@ -99,6 +105,7 @@ void IRCaptureLoadAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer,
     {
         inputGain.setTargetValue(juce::Decibels::decibelsToGain(inputGainDb.load()));
         float outPeak = 0.0f;
+        float recordedPeak = 0.0f;
         const int length = static_cast<int>(recordedReturn.size());
         int pos = capturePosition.load(std::memory_order_relaxed);
         for (int i = 0; i < n; ++i)
@@ -108,6 +115,7 @@ void IRCaptureLoadAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer,
             {
                     const float rawReturn = in[i];
                     const float ret = rawReturn * inputGain.getNextValue();
+                    recordedPeak = juce::jmax(recordedPeak, std::abs(ret));
                     if (!std::isfinite(rawReturn) || !std::isfinite(ret) || std::abs(rawReturn) >= 0.999f || std::abs(ret) >= 0.999f)
                 {
                     captureClipping.store(true);
@@ -135,6 +143,8 @@ void IRCaptureLoadAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer,
             out[i] = sample;
             outPeak = juce::jmax(outPeak, std::abs(sample));
         }
+        if (state == CaptureState::Recording || captureState.load() == CaptureState::Recording)
+            inputPeakDb.store(toDb(recordedPeak));
         outputPeakDb.store(toDb(outPeak));
         return;
     }
@@ -152,7 +162,11 @@ void IRCaptureLoadAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer,
     for (int s = 0; s < 2; ++s)
     {
         auto& slot = slots[s];
-        if (!slot.loaded.load(std::memory_order_acquire) || !slot.enabled.load()) continue;
+        if (!slot.loaded.load(std::memory_order_acquire) || !slot.enabled.load())
+        {
+            (s == 0 ? workA : workB).clear(0, n);
+            continue;
+        }
         auto& work = s == 0 ? workA : workB;
         auto& block = s == 0 ? blockA : blockB;
         slot.convolution.process(juce::dsp::ProcessContextReplacing<float>(block));
@@ -161,9 +175,33 @@ void IRCaptureLoadAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer,
         slot.gain.setTargetValue(targetGain);
         for (int i = 0; i < n; ++i)
         {
-            out[i] += source[i] * slot.gain.getNextValue();
-            finalPeak = juce::jmax(finalPeak, std::abs(out[i]));
+            source[i] *= slot.gain.getNextValue();
         }
+    }
+    const int baseDelay = juce::roundToInt(hostSampleRate.load() * 0.004);
+    const int offsetDelay = juce::roundToInt(hostSampleRate.load() * slotBOffsetMs.load() * 0.001f);
+    slotBDelaySamples.setTargetValue(static_cast<float>(juce::jlimit(0, 2 * baseDelay, baseDelay + offsetDelay)));
+    auto* sourceA = workA.getReadPointer(0);
+    auto* sourceB = workB.getReadPointer(0);
+    for (int i = 0; i < n; ++i)
+    {
+        slotADelay[static_cast<size_t>(delayPosition)] = sourceA[i];
+        slotBDelay[static_cast<size_t>(delayPosition)] = sourceB[i];
+        const int delayA = baseDelay;
+        const float delayB = slotBDelaySamples.getNextValue();
+        const int readA = (delayPosition - delayA + static_cast<int>(slotADelay.size())) % static_cast<int>(slotADelay.size());
+        const int delayB0 = static_cast<int>(delayB);
+        const int delayB1 = juce::jmin(delayB0 + 1, static_cast<int>(slotBDelay.size()) - 1);
+        const int readB0 = (delayPosition - delayB0 + static_cast<int>(slotBDelay.size())) % static_cast<int>(slotBDelay.size());
+        const int readB1 = (delayPosition - delayB1 + static_cast<int>(slotBDelay.size())) % static_cast<int>(slotBDelay.size());
+        const float a = delayA == 0 ? sourceA[i] : slotADelay[static_cast<size_t>(readA)];
+        const float delayBFrac = delayB - delayB0;
+        const float b = delayB <= 0.0f ? sourceB[i]
+            : slotBDelay[static_cast<size_t>(readB0)] * (1.0f - delayBFrac)
+              + slotBDelay[static_cast<size_t>(readB1)] * delayBFrac;
+        out[i] = a + b;
+        finalPeak = juce::jmax(finalPeak, std::abs(out[i]));
+        delayPosition = (delayPosition + 1) % static_cast<int>(slotADelay.size());
     }
     const float outputTarget = juce::Decibels::decibelsToGain(outputGainDb.load());
     outputGain.setTargetValue(outputTarget);
@@ -247,6 +285,63 @@ std::vector<float> IRCaptureLoadAudioProcessor::getSlotWaveform(int slot) const
         v[static_cast<size_t>(x)] = peak;
     }
     return v;
+}
+
+std::vector<float> IRCaptureLoadAudioProcessor::getSlotStartSamples(int slot, int count) const
+{
+    if (slot < 0 || slot > 1 || count <= 0) return {};
+    const juce::ScopedLock lock(dataLock);
+    const auto& ir = slots[slot].ir;
+    if (ir.getNumSamples() == 0) return {};
+    std::vector<float> samples(static_cast<size_t>(count), 0.0f);
+    const double step = slots[slot].sampleRate / 48000.0;
+    const auto* source = ir.getReadPointer(0);
+    for (int i = 0; i < count; ++i)
+    {
+        const double position = i * step;
+        const int index = static_cast<int>(position);
+        if (index >= ir.getNumSamples()) break;
+        const int next = juce::jmin(index + 1, ir.getNumSamples() - 1);
+        const float frac = static_cast<float>(position - index);
+        samples[static_cast<size_t>(i)] = source[index] + (source[next] - source[index]) * frac;
+    }
+    return samples;
+}
+
+void IRCaptureLoadAudioProcessor::setSlotBOffsetMs(float ms)
+{
+    slotBOffsetMs.store(juce::jlimit(-2.0f, 2.0f, ms));
+}
+
+float IRCaptureLoadAudioProcessor::autoAlignSlotB()
+{
+    const auto a = getSlotStartSamples(0, 960);
+    const auto b = getSlotStartSamples(1, 960);
+    if (a.empty() || b.empty()) return slotBOffsetMs.load();
+    constexpr int search = 96; // ±2 ms at 48 kHz
+    constexpr int begin = 24;  // ignore the first 0.5 ms of leading silence
+    constexpr int end = 480;   // correlate the first 10 ms
+    double bestScore = -1.0;
+    int bestLag = 0;
+    for (int lag = -search; lag <= search; ++lag)
+    {
+        double cross = 0.0, energyA = 0.0, energyB = 0.0;
+        for (int i = begin; i < end; ++i)
+        {
+            const int j = i + lag;
+            if (j < 0 || j >= static_cast<int>(b.size())) continue;
+            const double av = a[static_cast<size_t>(i)], bv = b[static_cast<size_t>(j)];
+            cross += av * bv;
+            energyA += av * av;
+            energyB += bv * bv;
+        }
+        const double score = (energyA > 1.0e-16 && energyB > 1.0e-16)
+            ? cross / std::sqrt(energyA * energyB) : 0.0;
+        if (score > bestScore) { bestScore = score; bestLag = lag; }
+    }
+    const float result = juce::jlimit(-2.0f, 2.0f, -bestLag * 1000.0f / 48000.0f);
+    setSlotBOffsetMs(result);
+    return result;
 }
 
 bool IRCaptureLoadAudioProcessor::armCapture()
@@ -475,6 +570,59 @@ std::vector<float> IRCaptureLoadAudioProcessor::getResultWaveform() const
     }
     return bins;
 }
+std::vector<float> IRCaptureLoadAudioProcessor::getResultSpectrum() const
+{
+    constexpr int fftOrder = 15;
+    constexpr int fftSize = 1 << fftOrder;
+    constexpr int points = 240;
+    std::vector<float> samples;
+    {
+        const juce::ScopedLock lock(dataLock);
+        samples = resultIR;
+    }
+    if (samples.empty()) return {};
+    juce::dsp::FFT fft(fftOrder);
+    std::vector<float> fftData(static_cast<size_t>(fftSize * 2), 0.0f);
+    const int copied = juce::jmin(static_cast<int>(samples.size()), fftSize);
+    for (int i = 0; i < copied; ++i)
+    {
+        const float window = copied > 1 ? 0.5f - 0.5f * std::cos(juce::MathConstants<float>::twoPi * i / (copied - 1)) : 1.0f;
+        fftData[static_cast<size_t>(i)] = samples[static_cast<size_t>(i)] * window;
+    }
+    fft.performRealOnlyForwardTransform(fftData.data());
+    const int maxBin = fftSize / 2;
+    std::vector<float> magnitudes(static_cast<size_t>(maxBin + 1), 0.0f);
+    float maxMagnitude = 0.0f;
+    for (int k = 1; k <= maxBin; ++k)
+    {
+        const float re = fftData[static_cast<size_t>(2 * k)];
+        const float im = fftData[static_cast<size_t>(2 * k + 1)];
+        magnitudes[static_cast<size_t>(k)] = std::sqrt(re * re + im * im);
+        maxMagnitude = juce::jmax(maxMagnitude, magnitudes[static_cast<size_t>(k)]);
+    }
+    if (maxMagnitude <= 0.0f) return {};
+    std::vector<float> db(static_cast<size_t>(points), -60.0f);
+    for (int x = 0; x < points; ++x)
+    {
+        const double fraction = x / static_cast<double>(points - 1);
+        const double frequency = 20.0 * std::pow(20000.0 / 20.0, fraction);
+        const double halfBand = frequency * (std::pow(2.0, 1.0 / 24.0) - 1.0);
+        const int first = juce::jmax(1, static_cast<int>(std::floor((frequency - halfBand) * fftSize / captureRate)));
+        const int last = juce::jmin(maxBin, static_cast<int>(std::ceil((frequency + halfBand) * fftSize / captureRate)));
+        double sumSquares = 0.0;
+        int count = 0;
+        for (int k = first; k <= last; ++k)
+        {
+            const double hz = static_cast<double>(k) * captureRate / fftSize;
+            if (hz >= 20.0 && hz <= 20000.0)
+            { const double m = magnitudes[static_cast<size_t>(k)]; sumSquares += m * m; ++count; }
+        }
+        const double magnitude = count > 0 ? std::sqrt(sumSquares / count) : 0.0;
+        db[static_cast<size_t>(x)] = static_cast<float>(juce::jlimit(-60.0, 0.0,
+            magnitude > 0.0 ? 20.0 * std::log10(magnitude / maxMagnitude) : -60.0));
+    }
+    return db;
+}
 bool IRCaptureLoadAudioProcessor::useResultInSlot(int slot)
 {
     if (captureState.load() != CaptureState::Ready || slot < 0 || slot > 1) return false;
@@ -506,15 +654,66 @@ bool IRCaptureLoadAudioProcessor::saveResultWav(const juce::File& file, juce::St
     return true;
 }
 
+bool IRCaptureLoadAudioProcessor::saveSlotWav(int slot, const juce::File& file, juce::String& error) const
+{
+    if (slot < 0 || slot > 1) { error = "Choose slot A or B."; return false; }
+    std::vector<float> source;
+    double sourceRate = 0.0;
+    {
+        const juce::ScopedLock lock(dataLock);
+        const auto& data = slots[slot].ir;
+        if (data.getNumSamples() == 0) { error = "This slot is empty."; return false; }
+        sourceRate = slots[slot].sampleRate;
+        source.assign(data.getReadPointer(0), data.getReadPointer(0) + data.getNumSamples());
+    }
+    const int outputCount = juce::jmax(1, juce::roundToInt(source.size() * 48000.0 / sourceRate));
+    juce::AudioBuffer<float> data(1, outputCount);
+    auto* output = data.getWritePointer(0);
+    const double cutoff = juce::jmin(1.0, 48000.0 / sourceRate);
+    constexpr int radius = 16;
+    for (int i = 0; i < outputCount; ++i)
+    {
+        const double position = i * sourceRate / 48000.0;
+        const int centre = static_cast<int>(std::floor(position));
+        double weighted = 0.0, weightSum = 0.0;
+        for (int tap = centre - radius + 1; tap <= centre + radius; ++tap)
+        {
+            if (tap < 0 || tap >= static_cast<int>(source.size())) continue;
+            const double distance = position - tap;
+            const double scaled = distance * cutoff;
+            const double sinc = std::abs(scaled) < 1.0e-9 ? 1.0
+                : std::sin(juce::MathConstants<double>::pi * scaled) / (juce::MathConstants<double>::pi * scaled);
+            const double windowPosition = distance / radius;
+            if (std::abs(windowPosition) >= 1.0) continue;
+            const double window = 0.5 + 0.5 * std::cos(juce::MathConstants<double>::pi * windowPosition);
+            const double weight = cutoff * sinc * window;
+            weighted += source[static_cast<size_t>(tap)] * weight;
+            weightSum += weight;
+        }
+        output[i] = weightSum != 0.0 ? static_cast<float>(weighted / weightSum) : 0.0f;
+    }
+    juce::WavAudioFormat wav;
+    std::unique_ptr<juce::OutputStream> stream(file.createOutputStream());
+    if (!stream) { error = "Could not create the WAV file."; return false; }
+    const auto options = juce::AudioFormatWriterOptions().withSampleRate(48000.0).withNumChannels(1)
+        .withBitsPerSample(32).withSampleFormat(juce::AudioFormatWriterOptions::SampleFormat::floatingPoint);
+    std::unique_ptr<juce::AudioFormatWriter> writer(wav.createWriterFor(stream, options));
+    if (!writer) { error = "Could not write a 32-bit float WAV."; return false; }
+    if (!writer->writeFromAudioSampleBuffer(data, 0, outputCount)) { error = "WAV writing failed."; return false; }
+    error.clear();
+    return true;
+}
+
 void IRCaptureLoadAudioProcessor::getStateInformation(juce::MemoryBlock& dest)
 {
     juce::MemoryOutputStream out(dest, false);
-    out.writeInt(0x4952434c); out.writeInt(3);
+    out.writeInt(0x4952434c); out.writeInt(4);
     const auto state = captureState.load();
     out.writeInt(state == CaptureState::Loader ? 0 : 1); // restore any capture page state silently and unarmed
     out.writeFloat(sweepLevelDb.load());
     out.writeFloat(inputGainDb.load());
     out.writeFloat(outputGainDb.load());
+    out.writeFloat(slotBOffsetMs.load());
     const juce::ScopedLock lock(dataLock);
     for (auto& slot : slots)
     {
@@ -530,7 +729,7 @@ void IRCaptureLoadAudioProcessor::setStateInformation(const void* data, int size
     juce::MemoryInputStream in(data, static_cast<size_t>(size), false);
     if (in.readInt() != 0x4952434c) return;
     const int version = in.readInt();
-    if (version != 2 && version != 3) return;
+    if (version != 2 && version != 3 && version != 4) return;
     const bool savedSilent = in.readInt() != 0;
     sweepLevelDb.store(juce::jlimit(-60.0f, -6.0f, in.readFloat()));
     if (version >= 3)
@@ -538,6 +737,7 @@ void IRCaptureLoadAudioProcessor::setStateInformation(const void* data, int size
         inputGainDb.store(juce::jlimit(-24.0f, 24.0f, in.readFloat()));
         outputGainDb.store(juce::jlimit(-24.0f, 24.0f, in.readFloat()));
     }
+    slotBOffsetMs.store(version >= 4 ? juce::jlimit(-2.0f, 2.0f, in.readFloat()) : 0.0f);
     for (int s = 0; s < 2; ++s)
     {
         const bool loaded = in.readBool(), enabled = in.readBool(), truncated = in.readBool();
