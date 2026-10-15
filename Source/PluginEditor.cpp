@@ -27,18 +27,19 @@ void IRCaptureLoadAudioProcessorEditor::Meter::paint(juce::Graphics& g)
     auto r = getLocalBounds().toFloat().reduced(1.0f);
     g.setColour(juce::Colour(0xff303741)); g.drawRoundedRectangle(r, 3.0f, 1.0f);
     r = r.reduced(2.0f);
-    r.setWidth(r.getWidth() * juce::jlimit(0.0f, 1.0f, (value + 60.0f) / 60.0f));
+    const float rangeFloor = showTarget ? -24.0f : -60.0f;
+    r.setWidth(r.getWidth() * juce::jlimit(0.0f, 1.0f, (value - rangeFloor) / -rangeFloor));
     g.setColour(value > -1.0f ? juce::Colours::red : juce::Colour(0xff54c7b5));
     g.fillRoundedRectangle(r, 2.0f);
     if (showTarget)
     {
         auto target = getLocalBounds().toFloat().reduced(3.0f);
-        target.setX(target.getX() + target.getWidth() * (48.0f / 60.0f));
-        target.setWidth(target.getWidth() * (6.0f / 60.0f));
-        g.setColour(juce::Colour(0xff49b78e).withAlpha(0.36f));
+        target.setX(target.getX() + target.getWidth() * 0.5f);
+        target.setWidth(target.getWidth() * 0.25f);
+        g.setColour(juce::Colour(0xff49d69b).withAlpha(0.68f));
         g.fillRect(target);
-        g.setColour(juce::Colour(0xff68d0a7));
-        g.drawRect(target, 1.0f);
+        g.setColour(juce::Colour(0xffa4ffd2));
+        g.drawRect(target, 1.5f);
     }
     g.setColour(juce::Colours::white);
     g.setFont(11.0f);
@@ -50,8 +51,6 @@ void IRCaptureLoadAudioProcessorEditor::SpectrumView::paint(juce::Graphics& g)
     g.fillAll(juce::Colour(0xff101318));
     auto bounds = getLocalBounds();
     g.setColour(juce::Colour(0xff303741)); g.drawRect(bounds);
-    g.setColour(juce::Colour(0xffc5cbd4)); g.setFont(11.0f);
-    g.drawText("Captured IR frequency response  •  1/12 octave smoothing  •  dB relative to peak", bounds.reduced(6, 1).removeFromTop(15), juce::Justification::centredLeft);
     auto plot = bounds.reduced(34, 18);
     plot.removeFromBottom(16);
     plot.removeFromLeft(2);
@@ -190,6 +189,13 @@ IRCaptureLoadAudioProcessorEditor::IRCaptureLoadAudioProcessorEditor(IRCaptureLo
         alignmentOffset.setValue(ms, juce::sendNotificationSync);
     };
     loaderPage.addAndMakeVisible(autoAlignButton);
+    swapButton.onClick = [this]
+    {
+        processor.swapSlotIRs();
+        alignmentOffset.setValue(0.0, juce::dontSendNotification);
+        timerCallback();
+    };
+    loaderPage.addAndMakeVisible(swapButton);
     alignmentOffset.setSliderStyle(juce::Slider::LinearHorizontal);
     alignmentOffset.setTextBoxStyle(juce::Slider::TextBoxRight, false, 68, 22);
     alignmentOffset.setRange(-2.0, 2.0, 1.0 / 48.0);
@@ -197,18 +203,13 @@ IRCaptureLoadAudioProcessorEditor::IRCaptureLoadAudioProcessorEditor(IRCaptureLo
     alignmentOffset.setValue(processor.getSlotBOffsetMs(), juce::dontSendNotification);
     alignmentOffset.onValueChange = [this] { processor.setSlotBOffsetMs(static_cast<float>(alignmentOffset.getValue())); };
     loaderPage.addAndMakeVisible(alignmentOffset);
-    alignmentLabel.setText("Slot B time shift vs A  (±2 ms)", juce::dontSendNotification);
-    alignmentLabel.setColour(juce::Label::textColourId, juce::Colours::white);
-    alignmentLabel.setFont(12.0f);
-    loaderPage.addAndMakeVisible(alignmentLabel);
+    alignmentOffset.setTooltip("Manual time shift for Slot B relative to Slot A.");
+    autoAlignButton.setTooltip("Match the strongest early transient peak in Slot B to Slot A.");
 
     inputLabel.setText("Input dBFS", juce::dontSendNotification); outputLabel.setText("Output dBFS", juce::dontSendNotification);
     for (auto* l : { &inputLabel, &outputLabel }) { l->setColour(juce::Label::textColourId, juce::Colours::white); l->setFont(12.0f); addAndMakeVisible(*l); }
     addAndMakeVisible(inputMeter); addAndMakeVisible(outputMeter);
 
-    settings.setText("48,000 Hz  •  Log sweep 20 Hz–20 kHz  •  262,144 samples (5.46 s)  •  one repetition\nReturn target -12 to -6 dBFS (green meter band)  •  250 ms lead-in  •  1 s tail  •  200 ms IR", juce::dontSendNotification);
-    settings.setColour(juce::Label::textColourId, juce::Colour(0xffc5cbd4)); settings.setJustificationType(juce::Justification::topLeft);
-    capturePage.addAndMakeVisible(settings);
     sweepLevel.setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag); sweepLevel.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 68, 20);
     sweepLevel.setRange(-60, -6, 0.1); sweepLevel.setValue(processor.getSweepLevelDb()); sweepLevel.setTextValueSuffix(" dBFS peak");
     sweepLevel.onValueChange = [this] { processor.setSweepLevelDb(static_cast<float>(sweepLevel.getValue())); };
@@ -230,8 +231,6 @@ IRCaptureLoadAudioProcessorEditor::IRCaptureLoadAudioProcessorEditor(IRCaptureLo
     capturePage.addAndMakeVisible(resultSpectrum);
     progress.setSliderStyle(juce::Slider::LinearBar); progress.setRange(0, 1, 0.001); progress.setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0); progress.setEnabled(false);
     capturePage.addAndMakeVisible(progress);
-    routing.setText(processor.getRoutingNotice(), juce::dontSendNotification); routing.setColour(juce::Label::textColourId, juce::Colour(0xffffc56e));
-    routing.setJustificationType(juce::Justification::topLeft); routing.setFont(12.0f); capturePage.addAndMakeVisible(routing);
     capturePage.addAndMakeVisible(captureStatus);
     showPage(false);
     startTimerHz(25);
@@ -264,8 +263,8 @@ void IRCaptureLoadAudioProcessorEditor::resized()
     inputGain.setBounds(inputBounds);
     outputGain.setBounds(outputBounds);
     auto meters = r.removeFromBottom(42);
-    inputLabel.setBounds(meters.removeFromLeft(88)); inputMeter.setBounds(meters.removeFromLeft(190).reduced(0, 10));
-    meters.removeFromLeft(20); outputLabel.setBounds(meters.removeFromLeft(95)); outputMeter.setBounds(meters.removeFromLeft(190).reduced(0, 10));
+    inputLabel.setBounds(meters.removeFromLeft(145)); inputMeter.setBounds(meters.removeFromLeft(220).reduced(0, 10));
+    meters.removeFromLeft(16); outputLabel.setBounds(meters.removeFromLeft(112)); outputMeter.setBounds(meters.removeFromLeft(190).reduced(0, 10));
     auto body = r.reduced(0, 8); loaderPage.setBounds(body); capturePage.setBounds(body);
     auto lr = loaderPage.getLocalBounds().reduced(12);
     auto alignment = lr.removeFromBottom(106);
@@ -275,8 +274,8 @@ void IRCaptureLoadAudioProcessorEditor::resized()
     auto alignmentPlot = alignment.removeFromTop(64);
     alignmentView.setBounds(alignmentPlot.removeFromLeft(400));
     autoAlignButton.setBounds(alignmentPlot.removeFromLeft(112).reduced(4, 12));
-    alignmentOffset.setBounds(alignment.removeFromBottom(27).removeFromRight(330));
-    alignmentLabel.setBounds(alignment.removeFromBottom(27).removeFromLeft(210));
+    swapButton.setBounds(alignmentPlot.removeFromLeft(100).reduced(4, 12));
+    alignmentOffset.setBounds(alignment.removeFromBottom(34));
     for (int i = 0; i < 2; ++i)
     {
         auto& s = slots[static_cast<size_t>(i)]; auto q = slotPanels[static_cast<size_t>(i)].getLocalBounds().reduced(12);
@@ -290,15 +289,13 @@ void IRCaptureLoadAudioProcessorEditor::resized()
         s.gain.setBounds(bottom.removeFromLeft(116));
     }
     auto cr = capturePage.getLocalBounds().reduced(16);
-    settings.setBounds(cr.removeFromTop(54));
-    auto controls = cr.removeFromTop(102); sweepLevel.setBounds(controls.removeFromLeft(120));
-    auto buttons = controls.reduced(6, 22); armButton.setBounds(buttons.removeFromLeft(112)); actionButton.setBounds(buttons.removeFromLeft(108));
-    progress.setBounds(cr.removeFromTop(20)); captureStatus.setBounds(cr.removeFromTop(34));
-    resultWave.setBounds(cr.removeFromTop(82));
-    resultSpectrum.setBounds(cr.removeFromTop(190));
+    auto controls = cr.removeFromTop(108); sweepLevel.setBounds(controls.removeFromLeft(120));
+    auto buttons = controls.reduced(6, 25); armButton.setBounds(buttons.removeFromLeft(112)); actionButton.setBounds(buttons.removeFromLeft(108));
+    progress.setBounds(cr.removeFromTop(20)); captureStatus.setBounds(cr.removeFromTop(32));
+    resultWave.setBounds(cr.removeFromTop(76));
+    resultSpectrum.setBounds(cr.removeFromTop(270));
     auto resultButtons = cr.removeFromTop(38); useAButton.setBounds(resultButtons.removeFromLeft(100)); useBButton.setBounds(resultButtons.removeFromLeft(100)); saveButton.setBounds(resultButtons.removeFromLeft(110));
     enableLoaderButton.setBounds(cr.removeFromTop(36).removeFromLeft(150));
-    routing.setBounds(cr.removeFromTop(56));
 }
 void IRCaptureLoadAudioProcessorEditor::showPage(bool capture)
 {
@@ -354,7 +351,7 @@ void IRCaptureLoadAudioProcessorEditor::timerCallback()
     if (capture)
     {
         inputMeter.setTargetRange(true);
-        inputLabel.setText("Return dBFS", juce::dontSendNotification);
+        inputLabel.setText("Return target −12 to −6 dBFS", juce::dontSendNotification);
         outputLabel.setText("Sweep Send dBFS", juce::dontSendNotification);
         captureStatus.setText(processor.getCaptureStatus(), juce::dontSendNotification);
         progress.setValue(processor.getCaptureProgress(), juce::dontSendNotification);
