@@ -66,8 +66,8 @@ private:
     void showPage(bool capture);
     IRCaptureLoadAudioProcessor& processor;
     juce::TextButton loaderTab { "Loader" }, captureTab { "Capture" };
-    juce::Label title, inputGainLabel, outputGainLabel, loaderStatus, captureStatus, routing, settings, inputLabel, outputLabel;
-    juce::Label alignmentLabel;
+    juce::Label title, inputGainLabel, outputGainLabel, loaderStatus, captureStatus, inputLabel, outputLabel;
+    juce::TextButton swapButton { "Swap A/B" };
     std::array<SlotControls, 2> slots;
     std::array<juce::TextButton, 2> useButtons { juce::TextButton("Use in A"), juce::TextButton("Use in B") };
     std::array<juce::Component, 2> slotPanels;
