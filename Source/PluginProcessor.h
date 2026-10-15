@@ -42,6 +42,11 @@ public:
     float getOutputGainDb() const { return outputGainDb.load(); }
     juce::String getSlotName(int slot) const;
     std::vector<float> getSlotWaveform(int slot) const;
+    std::vector<float> getSlotStartSamples(int slot, int count = 480) const;
+    bool saveSlotWav(int slot, const juce::File& file, juce::String& error) const;
+    void setSlotBOffsetMs(float ms);
+    float getSlotBOffsetMs() const { return slotBOffsetMs.load(); }
+    float autoAlignSlotB();
 
     void setSweepLevelDb(float db) { sweepLevelDb.store(juce::jlimit(-60.0f, -6.0f, db)); }
     float getSweepLevelDb() const { return sweepLevelDb.load(); }
@@ -54,6 +59,7 @@ public:
     float getCaptureProgress() const;
     juce::String getRoutingNotice() const;
     std::vector<float> getResultWaveform() const;
+    std::vector<float> getResultSpectrum() const;
     bool useResultInSlot(int slot);
     bool saveResultWav(const juce::File& file, juce::String& error) const;
     double getHostSampleRate() const { return hostSampleRate.load(); }
@@ -98,6 +104,7 @@ private:
     juce::AudioFormatManager formats;
     juce::AudioBuffer<float> workA, workB;
     juce::SmoothedValue<float> inputGain, outputGain;
+    juce::SmoothedValue<float> slotBDelaySamples;
     juce::CriticalSection dataLock;
     std::vector<float> emittedSweep, inverseSweep, recordedReturn, resultIR;
     juce::WaitableEvent extractionReady;
@@ -105,12 +112,15 @@ private:
     std::atomic<CaptureState> captureState { CaptureState::Loader };
     std::atomic<double> hostSampleRate { 0.0 };
     std::atomic<float> sweepLevelDb { -20.0f }, inputPeakDb { -100.0f }, outputPeakDb { -100.0f };
+    std::atomic<float> slotBOffsetMs { 0.0f };
     std::atomic<float> inputGainDb { 0.0f }, outputGainDb { 0.0f };
     std::atomic<int> capturePosition { 0 };
     std::atomic<bool> captureClipping { false };
     std::atomic<bool> captureBlockOverflow { false };
     std::atomic<bool> cancelExtraction { false };
     std::atomic<bool> extractionBusy { false };
+    std::array<float, 2048> slotADelay {}, slotBDelay {};
+    int delayPosition = 0;
     juce::String statusText { "Load one or two mono WAV impulse responses." };
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(IRCaptureLoadAudioProcessor)
 };
