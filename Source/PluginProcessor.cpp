@@ -1,6 +1,7 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 #include <cmath>
+#include <utility>
 
 namespace
 {
@@ -318,30 +319,68 @@ float IRCaptureLoadAudioProcessor::autoAlignSlotB()
     const auto a = getSlotStartSamples(0, 960);
     const auto b = getSlotStartSamples(1, 960);
     if (a.empty() || b.empty()) return slotBOffsetMs.load();
-    constexpr int search = 96; // ±2 ms at 48 kHz
-    constexpr int begin = 24;  // ignore the first 0.5 ms of leading silence
-    constexpr int end = 480;   // correlate the first 10 ms
-    double bestScore = -1.0;
-    int bestLag = 0;
-    for (int lag = -search; lag <= search; ++lag)
+    constexpr int transientWindow = 480; // first 10 ms at 48 kHz
+    auto peakIndex = [](const std::vector<float>& samples)
     {
-        double cross = 0.0, energyA = 0.0, energyB = 0.0;
-        for (int i = begin; i < end; ++i)
+        constexpr int window = 480;
+        int peak = 0;
+        float magnitude = 0.0f;
+        for (int i = 0; i < juce::jmin(window, static_cast<int>(samples.size())); ++i)
         {
-            const int j = i + lag;
-            if (j < 0 || j >= static_cast<int>(b.size())) continue;
-            const double av = a[static_cast<size_t>(i)], bv = b[static_cast<size_t>(j)];
-            cross += av * bv;
-            energyA += av * av;
-            energyB += bv * bv;
+            const float candidate = std::abs(samples[static_cast<size_t>(i)]);
+            if (candidate > magnitude) { magnitude = candidate; peak = i; }
         }
-        const double score = (energyA > 1.0e-16 && energyB > 1.0e-16)
-            ? cross / std::sqrt(energyA * energyB) : 0.0;
-        if (score > bestScore) { bestScore = score; bestLag = lag; }
-    }
-    const float result = juce::jlimit(-2.0f, 2.0f, -bestLag * 1000.0f / 48000.0f);
+        return std::pair<int, float>(peak, magnitude);
+    };
+    const auto [peakA, levelA] = peakIndex(a);
+    const auto [peakB, levelB] = peakIndex(b);
+    if (levelA < 1.0e-6f || levelB < 1.0e-6f) return slotBOffsetMs.load();
+    const int peakDifference = peakA - peakB;
+    const int boundedDifference = juce::jlimit(-transientWindow, transientWindow, peakDifference);
+    const float result = juce::jlimit(-2.0f, 2.0f, boundedDifference * 1000.0f / 48000.0f);
     setSlotBOffsetMs(result);
     return result;
+}
+
+void IRCaptureLoadAudioProcessor::swapSlotIRs()
+{
+    juce::AudioBuffer<float> copyA, copyB;
+    double rateA = 48000.0, rateB = 48000.0;
+    bool loadedA = false, loadedB = false;
+    {
+        const juce::ScopedLock lock(dataLock);
+        juce::AudioBuffer<float> temp(std::move(slots[0].ir));
+        slots[0].ir = std::move(slots[1].ir);
+        slots[1].ir = std::move(temp);
+        std::swap(slots[0].sampleRate, slots[1].sampleRate);
+        std::swap(slots[0].name, slots[1].name);
+        const bool truncatedA = slots[0].truncated.load();
+        slots[0].truncated.store(slots[1].truncated.load());
+        slots[1].truncated.store(truncatedA);
+        loadedA = slots[1].loaded.load();
+        loadedB = slots[0].loaded.load();
+        slots[0].loaded.store(loadedA);
+        slots[1].loaded.store(loadedB);
+        rateA = slots[0].sampleRate;
+        rateB = slots[1].sampleRate;
+        if (loadedA && slots[0].ir.getNumSamples() > 0)
+        {
+            copyA.setSize(1, slots[0].ir.getNumSamples());
+            copyA.copyFrom(0, 0, slots[0].ir, 0, 0, slots[0].ir.getNumSamples());
+        }
+        if (loadedB && slots[1].ir.getNumSamples() > 0)
+        {
+            copyB.setSize(1, slots[1].ir.getNumSamples());
+            copyB.copyFrom(0, 0, slots[1].ir, 0, 0, slots[1].ir.getNumSamples());
+        }
+    }
+    if (loadedA && copyA.getNumSamples() > 0)
+        slots[0].convolution.loadImpulseResponse(std::move(copyA), rateA, juce::dsp::Convolution::Stereo::no,
+            juce::dsp::Convolution::Trim::no, juce::dsp::Convolution::Normalise::no);
+    if (loadedB && copyB.getNumSamples() > 0)
+        slots[1].convolution.loadImpulseResponse(std::move(copyB), rateB, juce::dsp::Convolution::Stereo::no,
+            juce::dsp::Convolution::Trim::no, juce::dsp::Convolution::Normalise::no);
+    setSlotBOffsetMs(0.0f);
 }
 
 bool IRCaptureLoadAudioProcessor::armCapture()
@@ -448,7 +487,7 @@ void IRCaptureLoadAudioProcessor::extractCapture()
     if (ok)
     {
         resultIR = std::move(extracted);
-        statusText = "Capture ready. Assign to A or B, or save as WAV.";
+        statusText.clear();
         captureState.store(CaptureState::Ready, std::memory_order_release);
     }
     else
