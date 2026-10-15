@@ -21,8 +21,8 @@ The AU bundle is `build/IRCaptureLoad_artefacts/Release/AU/IR Capture + Load.com
 
 1. Insert **IR Capture + Load** on a mono audio track. The **Input** knob adjusts the signal before both IR slots; **Output** adjusts the summed Loader output. Both are 0 dB by default and range from -24 to +24 dB.
 2. Load a mono WAV into A or B. PCM and floating-point WAV are supported. Files are capped at 200 ms; longer files get a short end fade. Imported IRs keep their level and leading delay.
-3. Both slots process the same mono input in parallel. Each slot has its own level (-60 to +6 dB) and enable switch; the outputs sum to mono. Empty or disabled slots are silent.
-4. The project stores both IR sample payloads and their names/settings, so session recall does not depend on the original WAV path.
+3. Each slot has its own level (-60 to +6 dB) and enable switch. Empty or disabled slots are silent. **Export WAV** saves that slot's IR as mono, 48 kHz, 32-bit float WAV; it does not include the phase alignment shift.
+4. The Loader displays the first 10 ms of both IRs. **Auto Align** estimates a time shift for B against A; use the slider for manual adjustment within ±2 ms. The project stores the offset along with both IR sample payloads and their names/settings, so session recall does not depend on the original WAV path.
 
 ## Capture in Logic
 
@@ -33,8 +33,8 @@ This captures a linear response. Keep the amp clean; distortion and other level-
 3. On one mono audio track, select that mic input. Insert the plugin and open its Capture page. Set the track fader to unity and remove other inserts/sends that affect the measurement path.
 4. Click **Arm Capture** before enabling the hardware send. Arming switches the plugin output to silence. Enable Logic input monitoring so the plugin receives the return.
 5. Select the actual mono output mapping in Logic. Keep monitor speakers disconnected or muted from the send and keep other playback off that output.
-6. Start with a low interface/reamp output. The plugin sweep defaults to -20 dBFS peak (adjustable -60 to -6); the Loader Output knob does not change capture send level. Raise the physical mic return gain until observed peaks are roughly -12 to -6 dBFS without clipping. The Input knob also affects the captured return and can cause digital clipping if set too high. The digital sweep setting is not a calibrated voltage.
-7. Click **Start**. The plugin records a 250 ms lead-in, one 262,144-sample exponential sweep, and a 1 s tail. Extraction runs off the audio thread. A valid result can be assigned directly to A/B or saved as mono 48 kHz 32-bit float WAV.
+6. Start with a low interface/reamp output. The plugin sweep defaults to -20 dBFS peak (adjustable -60 to -6); the Loader Output knob does not change capture send level. During recording, aim for the green return-meter range of -12 to -6 dBFS without clipping. The Input knob also affects the captured return and can cause digital clipping if set too high. The digital sweep setting is not a calibrated voltage.
+7. Click **Start**. The plugin records a 250 ms lead-in, one 262,144-sample exponential sweep, and a 1 s tail. Extraction runs off the audio thread. A valid result displays its impulse waveform and a log-frequency FFT magnitude response (20 Hz–20 kHz, 1/12-octave smoothing, relative dB). Assign it directly to A/B or save as mono 48 kHz 32-bit float WAV.
 8. After Ready, Error, or Abort, the plugin stays silent. Before clicking **Enable Loader**, change the Logic track input back to the guitar/DI source and output back to the normal monitor bus, then confirm the prompt.
 
 Disable interface direct monitoring into the reamp output. Do not bypass or remove the plugin while this loop is connected: host bypass can route around the plugin's silence protection. The plugin never opens the audio interface itself; configure Quad Cortex routing in Logic and on the QC.
@@ -47,7 +47,7 @@ MATLAB code generation is **not integrated** into the AU. MATLAB R2026b is insta
 
 ## Limits and checks
 
-- Mono in/out only; AU v2 only. No VST3, dry/wet, EQ, alignment, nonlinear modeling, averaging, or calibration.
+- Mono in/out only; AU v2 only. No VST3, dry/wet, EQ, full phase correction, nonlinear modeling, averaging, or calibration. Loader alignment is a time shift of slot B, not all-pass phase correction.
 - Keep the measured amp clean. Hardware round-trip delay over 250 ms and returns with no clear response are rejected. Input clipping, invalid samples, host reset/sample-rate change, and abort keep capture silent and preserve previous slot IRs.
 - Physical reamp/amp capture has not been performed. Confirm the interface and Quad Cortex port routing on the actual setup.
 - Build verified with Xcode 26.2 and CMake on Apple silicon; the development AU is installed in `~/Library/Audio/Plug-Ins/Components/`.
